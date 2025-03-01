@@ -5,9 +5,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-//server is being configured to handle json
+// Server is configured to handle JSON
 app.use(express.json());
-//cors will help server to accept requests from multiple domains
+// CORS will help server to accept requests from multiple domains
 app.use(cors());
 
 const SECRET_KEY = 'my_super_secret_123!';
@@ -20,7 +20,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
 });
-/* create table user (username char(10) notnull unique) */
+
 const User = mongoose.model('User', userSchema);
 
 // Auction Item Schema
@@ -31,6 +31,7 @@ const auctionItemSchema = new mongoose.Schema({
   highestBidder: String,
   closingTime: Date,
   isClosed: { type: Boolean, default: false },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Track who created the auction
 });
 
 const AuctionItem = mongoose.model('AuctionItem', auctionItemSchema);
@@ -47,7 +48,7 @@ const authenticate = (req, res, next) => {
   });
 };
 
-// Signup Route called when signup form is submitted on the frontend
+// Signup Route (with password hashing)
 app.post('/Signup', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -56,14 +57,14 @@ app.post('/Signup', async (req, res) => {
     }
 
     const existingUser = await User.findOne({ username });
-    if (existingUser) 
-    {
+    if (existingUser) {
       return res.status(400).json({ message: 'Username already exists' });
     }
 
-    //const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = new User({ username, password });
-    await newUser.save();//a new user is being created in db
+    // Hash the password before saving
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({ username, password: hashedPassword });
+    await newUser.save();
 
     res.status(201).json({ message: 'User registered successfully' });
   } catch (error) {
@@ -72,33 +73,24 @@ app.post('/Signup', async (req, res) => {
   }
 });
 
-// Signin Route
+// Signin Route (with password verification)
 app.post('/signin', async (req, res) => {
   const { username, password } = req.body;
-  const user = await User.findOne({ username, password });
-  if (user) {
-    const token = jwt.sign({ userId: user._id, username }, SECRET_KEY, { expiresIn: '1h' });//this token helps the user to remain signed in for an 1hour
-      res.json({ message: 'Signin successful', token });
+  const user = await User.findOne({ username });
+
+  if (!user) {
+    return res.status(400).json({ message: 'Invalid credentials' });
+  }
+
+  // Compare the password with the hashed password in the database
+  const isMatch = await bcrypt.compare(password, user.password);
+  if (isMatch) {
+    const token = jwt.sign({ userId: user._id, username }, SECRET_KEY, { expiresIn: '1h' });
+    res.json({ message: 'Signin successful', token });
   } else {
     res.status(400).json({ message: 'Invalid credentials' });
   }
 });
-// app.post('/Signin', async (req, res) => {
-//   try {
-//     const { username, password } = req.body;
-//     const user = await User.findOne({ username, password });
-//     if (user) {
-//       const token = jwt.sign({ userId: user._id, username }, SECRET_KEY, { expiresIn: '1h' });
-//       res.json({ message: 'Signin successful', token });
-//     }
-//     else {
-//       res.status(400).json({ message: 'Invalid credentials' });
-//     }
-//   } catch (error) {
-//     console.error('Signin Error:', error);
-//     res.status(500).json({ message: 'Internal Server Error' });
-//   }
-// });
 
 // Create Auction Item (Protected)
 app.post('/auction', authenticate, async (req, res) => {
@@ -115,6 +107,7 @@ app.post('/auction', authenticate, async (req, res) => {
       currentBid: startingBid,
       highestBidder: '',
       closingTime,
+      createdBy: req.user._id,  // Store the creator's user ID
     });
 
     await newItem.save();
@@ -128,8 +121,7 @@ app.post('/auction', authenticate, async (req, res) => {
 // Get all auction items
 app.get('/auctions', async (req, res) => {
   try {
-    const auctions = await AuctionItem.find();//get all
-    //select * from actionitem
+    const auctions = await AuctionItem.find();
     res.json(auctions);
   } catch (error) {
     console.error('Fetching Auctions Error:', error);
@@ -141,8 +133,7 @@ app.get('/auctions', async (req, res) => {
 app.get('/auctions/:id', async (req, res) => {
   try {
     const auctionItem = await AuctionItem.findById(req.params.id);
-    if (!auctionItem) 
-      return res.status(404).json({ message: 'Auction not found' });
+    if (!auctionItem) return res.status(404).json({ message: 'Auction not found' });
 
     res.json(auctionItem);
   } catch (error) {
@@ -177,6 +168,31 @@ app.post('/bid/:id', authenticate, async (req, res) => {
     }
   } catch (error) {
     console.error('Bidding Error:', error);
+    res.status(500).json({ message: 'Internal Server Error' });
+  }
+});
+
+// Delete an auction item (Protected)
+app.delete('/auction/:id', authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if the auction item exists
+    const auctionItem = await AuctionItem.findById(id);
+    if (!auctionItem) {
+      return res.status(404).json({ message: 'Auction item not found' });
+    }
+
+    // Check if the user is the creator or the highest bidder
+    if (auctionItem.highestBidder === req.user.username || auctionItem.createdBy.toString() === req.user._id.toString()) {
+      await AuctionItem.findByIdAndDelete(id);
+      res.json({ message: 'Auction item deleted successfully' });
+    } else {
+      res.status(403).json({ message: 'You do not have permission to delete this auction item' });
+    }
+
+  } catch (error) {
+    console.error('Delete Auction Error:', error);
     res.status(500).json({ message: 'Internal Server Error' });
   }
 });
